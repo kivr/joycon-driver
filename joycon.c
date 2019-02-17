@@ -20,6 +20,12 @@
                          || B[0] == 0x30 && (B[3] & 0x10)\
                          || B[0] == 0x30 && (B[5] & 0x10))
 
+#define IS_HOME_SET(B) (B[0] == 0x3F && (B[2] & 0x10)\
+                         || B[0] == 0x30 && (B[4] & 0x10))
+
+#define IS_CAPT_SET(B) (B[0] == 0x3F && (B[2] & 0x20)\
+                         || B[0] == 0x30 && (B[4] & 0x20))
+
 static bool emulate_3button = true;
 module_param(emulate_3button, bool, 0644);
 MODULE_PARM_DESC(emulate_3button, "Emulate a middle button");
@@ -368,16 +374,73 @@ static int checkForSingleSelection(struct joycon *joycon, u8 *data, int size)
     }
 }
 
+static int joycon_setup_input(struct hid_device *hdev)
+{
+    int error;
+    int mt_flags = 0;
+    struct input_dev *input;
+    
+    struct joycon *joycon = hid_get_drvdata(hdev);
+
+    input = input_allocate_device();
+    if (!input)
+        return -1;
+
+    printk("Setup Input");
+
+    input->name = "JoyCon";
+    input->id.bustype = BUS_BLUETOOTH;
+    input->id.vendor = 0x0001;
+    input->id.product = 0x0001;
+    input->id.version = 0x0100;
+
+    __set_bit(EV_KEY, input->evbit);
+    __set_bit(BTN_LEFT, input->keybit);
+    __set_bit(BTN_DPAD_UP, input->keybit);
+    __set_bit(BTN_DPAD_DOWN, input->keybit);
+    __set_bit(BTN_DPAD_LEFT, input->keybit);
+    __set_bit(BTN_DPAD_RIGHT, input->keybit);
+    __set_bit(BTN_NORTH, input->keybit);
+    __set_bit(BTN_SOUTH, input->keybit);
+    __set_bit(BTN_WEST, input->keybit);
+    __set_bit(BTN_EAST, input->keybit);
+    __set_bit(BTN_TL, input->keybit);
+    __set_bit(BTN_TR, input->keybit);
+    __set_bit(BTN_START, input->keybit);
+    __set_bit(BTN_SELECT, input->keybit);
+    
+    __set_bit(EV_ABS, input->evbit);
+    __set_bit(ABS_X, input->absbit);
+    __set_bit(ABS_X, input->absbit);
+    __set_bit(ABS_Y, input->absbit);
+    __set_bit(ABS_RX, input->absbit);
+    __set_bit(ABS_RY, input->absbit);
+
+    input_set_abs_params(input, ABS_X, 800, 3200, 4, 0);
+    input_set_abs_params(input, ABS_Y, 800, 3200, 4, 0);
+    input_set_abs_params(input, ABS_RX, 800, 3200, 4, 0);
+    input_set_abs_params(input, ABS_RY, 800, 3200, 4, 0);
+
+    input_set_events_per_packet(input, 60);
+
+    error = input_register_device(input);
+    if (error) {
+        input_free_device(input);
+        return -1;
+    }
+
+    joycon->input = input;
+
+    return 0;
+}
+
 static int checkForCompositeSelection(struct joycon *joycon, u8 *data, int size)
 {
     struct list_head *pos;
     struct joycon *leftJoycon = NULL;
     struct joycon *rightJoycon = NULL;
 
-    if (IS_L_OR_R_SET(data))
-    {
-        joycon->state = FINDING_PEER;
-    }
+    joycon->state = IS_L_OR_R_SET(data) ? FINDING_PEER : INITIAL;
 
     list_for_each(pos, &joycon_list)
     {
@@ -395,9 +458,8 @@ static int checkForCompositeSelection(struct joycon *joycon, u8 *data, int size)
 
         if (leftJoycon != NULL && rightJoycon != NULL)
         {
-            hid_hw_stop(leftJoycon->hdev);
-            hid_hw_start(leftJoycon->hdev,
-                         HID_CONNECT_HIDRAW | HID_CONNECT_HIDDEV);
+
+            joycon_setup_input(leftJoycon->hdev);
 
             if (leftJoycon->input) {
                 leftJoycon->state = CONNECTED;
@@ -406,7 +468,7 @@ static int checkForCompositeSelection(struct joycon *joycon, u8 *data, int size)
                 hid_set_drvdata(rightJoycon->hdev, leftJoycon);
                 leftJoycon->hdev2 = rightJoycon->hdev;
                 list_del(&rightJoycon->list_head);
-                devm_kfree(&rightJoycon->hdev->dev, rightJoycon);
+                kfree(rightJoycon);
 
                 sendCommand(leftJoycon->hdev, 0x30, (char[]){0x01}, 1);
                 sendCommand(leftJoycon->hdev2, 0x30, (char[]){0x01}, 1);
@@ -423,8 +485,6 @@ static int magicmouse_raw_event(struct hid_device *hdev,
     struct input_dev *input = joycon->input;
     int x = 0, y = 0, ii, clicks = 0, npoints;
 
-    printk("Report %d", report->id);
-
     if (input)
     {
         switch (data[0]) {
@@ -438,6 +498,10 @@ static int magicmouse_raw_event(struct hid_device *hdev,
                         input_report_key(input, BTN_DPAD_DOWN, data[1] & 0x02);
                         input_report_key(input, BTN_DPAD_UP, data[1] & 0x04);
                         input_report_key(input, BTN_DPAD_RIGHT, data[1] & 0x08);
+
+                        input_report_key(input, BTN_TL, IS_L_OR_R_SET(data));
+
+                        input_report_key(input, BTN_SELECT, IS_CAPT_SET(data));
                     }
                     else
                     {
@@ -445,6 +509,10 @@ static int magicmouse_raw_event(struct hid_device *hdev,
                         input_report_key(input, BTN_NORTH, data[1] & 0x02);
                         input_report_key(input, BTN_SOUTH, data[1] & 0x04);
                         input_report_key(input, BTN_WEST, data[1] & 0x08);
+
+                        input_report_key(input, BTN_TR, IS_L_OR_R_SET(data));
+
+                        input_report_key(input, BTN_START, IS_HOME_SET(data));
                     }
                 }
                 else
@@ -484,78 +552,6 @@ static int magicmouse_raw_event(struct hid_device *hdev,
     return 1;
 }
 
-static int magicmouse_setup_input(struct input_dev *input, struct hid_device *hdev)
-{
-    int error;
-    int mt_flags = 0;
-
-    printk("Setup Input");
-
-    __set_bit(EV_KEY, input->evbit);
-    __set_bit(BTN_LEFT, input->keybit);
-    __set_bit(BTN_DPAD_UP, input->keybit);
-    __set_bit(BTN_DPAD_DOWN, input->keybit);
-    __set_bit(BTN_DPAD_LEFT, input->keybit);
-    __set_bit(BTN_DPAD_RIGHT, input->keybit);
-    __set_bit(BTN_NORTH, input->keybit);
-    __set_bit(BTN_SOUTH, input->keybit);
-    __set_bit(BTN_WEST, input->keybit);
-    __set_bit(BTN_EAST, input->keybit);
-    __set_bit(BTN_TL, input->keybit);
-    __set_bit(BTN_TR, input->keybit);
-    __set_bit(BTN_START, input->keybit);
-    __set_bit(BTN_SELECT, input->keybit);
-    
-    __set_bit(EV_ABS, input->evbit);
-    __set_bit(ABS_X, input->absbit);
-    __set_bit(ABS_X, input->absbit);
-    __set_bit(ABS_Y, input->absbit);
-    __set_bit(ABS_RX, input->absbit);
-    __set_bit(ABS_RY, input->absbit);
-
-    input_set_abs_params(input, ABS_X, 800, 3200, 4, 0);
-    input_set_abs_params(input, ABS_Y, 800, 3200, 4, 0);
-    input_set_abs_params(input, ABS_RX, 800, 3200, 4, 0);
-    input_set_abs_params(input, ABS_RY, 800, 3200, 4, 0);
-
-    input_set_events_per_packet(input, 60);
-
-    return 0;
-}
-
-static int magicmouse_input_mapping(struct hid_device *hdev,
-        struct hid_input *hi, struct hid_field *field,
-        struct hid_usage *usage, unsigned long **bit, int *max)
-{
-    struct joycon *msc = hid_get_drvdata(hdev);
-
-    if (!msc->input)
-        msc->input = hi->input;
-
-    return 0;
-}
-
-static int magicmouse_input_configured(struct hid_device *hdev,
-        struct hid_input *hi)
-
-{
-    struct joycon *msc = hid_get_drvdata(hdev);
-    int ret;
-
-    if (msc->input)
-    {
-        ret = magicmouse_setup_input(msc->input, hdev);
-        if (ret) {
-            hid_err(hdev, "magicmouse setup input failed (%d)\n", ret);
-            /* clean msc->input to notify probe() of the failure */
-            msc->input = NULL;
-            return ret;
-        }
-    }
-
-    return 0;
-}
-
 static int magicmouse_probe(struct hid_device *hdev,
         const struct hid_device_id *id)
 {
@@ -569,7 +565,7 @@ static int magicmouse_probe(struct hid_device *hdev,
     int ret;
     int feature_size;
 
-    joycon = devm_kzalloc(&hdev->dev, sizeof(*joycon), GFP_KERNEL);
+    joycon = kzalloc(sizeof(*joycon), GFP_KERNEL);
     if (joycon == NULL) {
         hid_err(hdev, "can't alloc magicmouse descriptor\n");
         return -ENOMEM;
@@ -605,6 +601,23 @@ err_stop_hw:
     return ret;
 }
 
+void joycon_remove(struct hid_device *hdev)
+{
+    struct joycon *joycon = hid_get_drvdata(hdev);
+
+    if (joycon->input)
+    {
+        input_free_device(joycon->input);
+    }
+
+    list_del(&joycon->list_head);
+
+    hid_set_drvdata(joycon->hdev, NULL);
+    hid_set_drvdata(joycon->hdev2, NULL);
+
+    kfree(joycon);
+}
+
 static const struct hid_device_id joy_cons[] = {
     { HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_NINTENDO,
             USB_DEVICE_ID_NINTENDO_JOY_CON_L), .driver_data = 0 },
@@ -619,9 +632,8 @@ static struct hid_driver joycon_driver = {
     .name = "joycon",
     .id_table = joy_cons,
     .probe = magicmouse_probe,
+    .remove = joycon_remove,
     .raw_event = magicmouse_raw_event,
-    .input_mapping = magicmouse_input_mapping,
-    .input_configured = magicmouse_input_configured,
 };
 
 module_hid_driver(joycon_driver);

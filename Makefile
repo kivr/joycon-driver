@@ -1,4 +1,5 @@
 obj-m += joycon.o
+MY_CFLAGS += -g -DDEBUG 
 
 KVERSION := $(KERNELRELEASE)
 ifeq ($(origin KERNELRELEASE), undefined)
@@ -20,3 +21,6 @@ test: all
 	sync
 	-rmmod joycon
 	insmod ./joycon.ko
+
+debug: ccflags-y += ${MY_CFLAGS} CC += ${MY_CFLAGS}
+debug: all
